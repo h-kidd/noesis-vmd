@@ -6,6 +6,10 @@ import io
 import math
 import shlex
 
+isMmdCam = True #Export a camera as a native MMD camera
+fovThreshold = 0.4 #Threshold to change the base fov (for native mdm cams)
+cleanupThreshold = 0.001 #Remove a keyframe if the difference is less than this threshold
+
 class Vmd:
 
     def __init__(self, name, frameCount, animData, morphData, boneDictName, morphDictName, pmxScale, scaleExcludeList):
@@ -25,6 +29,20 @@ class Vmd:
         f.write(self.name.encode('shift_jis')[:19].ljust(20, b'\0'))#model name
         self.writeAnim(f)
         self.writeMorph(f)
+        f.write(struct.pack('4i',0,0,0,0))
+        f.close()
+        print("Successfully wrote " + self.name + ".vmd")
+
+    def wrtieCamVmd(self, outDir, camName, fovName, intName = 'None'):
+        writeName = outDir + self.name + ".vmd"
+        f = open(writeName, 'wb')
+        f.write("Vocaloid Motion Data 0002".encode('shift_jis').ljust(30, b'\0'))#magic
+        if isMmdCam:
+            f.write(bytearray.fromhex('83 4A 83 81 83 89 81 45 8F C6 96 BE 00 6F 6E 20 44 61 74 61'))
+            f.write(struct.pack('2i',0,0))
+        else:
+            f.write('Camera'.encode('shift_jis')[:19].ljust(20, b'\0'))#model name
+        self.writeCam(f, camName, fovName, intName)
         f.write(struct.pack('4i',0,0,0,0))
         f.close()
         print("Successfully wrote " + self.name + ".vmd")
@@ -103,13 +121,13 @@ class Vmd:
                     else:
                         keyFrame.rot = preRot
                     keyFrames.append(keyFrame)
-        f.write(struct.pack('i', len(keyFrames)))
+        f.write(struct.pack('I', len(keyFrames)))
         for keyFrame in keyFrames:
             if keyFrame.name in boneDict:
                 f.write(boneDict[keyFrame.name].encode('shift_jis')[:14].ljust(15, b'\0'))
             else:
                 f.write(keyFrame.name.encode('shift_jis')[:14].ljust(15, b'\0'))
-            f.write(struct.pack('i', keyFrame.frame))
+            f.write(struct.pack('I', keyFrame.frame))
             if keyFrame.name not in self.scaleExcludeList:
                 f.write(struct.pack('f', keyFrame.pos[0] * self.pmxScale))
                 f.write(struct.pack('f', keyFrame.pos[1] * self.pmxScale))
@@ -126,14 +144,148 @@ class Vmd:
             morphDict = self.readDict(self.morphDictName)
         else:
             morphDict = {}
-        f.write(struct.pack('i', len(self.morphData)))
+        f.write(struct.pack('I', len(self.morphData)))
         for morph in self.morphData:
             if morph.name in morphDict:
                 f.write(morphDict[morph.name].encode('shift_jis')[:14].ljust(15, b'\0'))
             else:
                 f.write(morph.name.encode('shift_jis')[:14].ljust(15, b'\0'))
-            f.write(struct.pack('i', morph.frame))
+            f.write(struct.pack('I', morph.frame))
             f.write(struct.pack('f', morph.blend))
+
+    def writeCam(self, f, camName, fovName, intName):
+        keyFrames = []
+        rawFrames = {camName: [], fovName: [], intName: []}
+        anim = self.animData
+        for i in range(len(anim.kfBones)):
+            kfBone = anim.kfBones[i]
+            name = anim.bones[kfBone.boneIndex].name
+            if name in rawFrames:
+                posFrames = kfBone.translationKeys
+                rotFrames = kfBone.rotationKeys
+                if posFrames == []:
+                    posFrames = [NoeKeyFramedValue(0, NoeVec3())]
+                if rotFrames == []:
+                    rotFrames = [NoeKeyFramedValue(0, NoeQuat())]
+                posIdx = 0
+                rotIdx = 0
+                prePos = posFrames[0].value
+                preRot = rotFrames[0].value
+                for a in range(self.frameCount):
+                    keyFrame = KeyFrame(name, a)
+                    if len(posFrames) == 1 and posFrames[0].value == NoeVec3():
+                        keyFrame.pos = prePos
+                    elif a == posFrames[posIdx].time:
+                        pos = posFrames[posIdx].value
+                        keyFrame.pos = pos
+                        prePos = pos
+                        if posIdx + 1 != len(posFrames):
+                            posIdx += 1
+                    else:
+                        keyFrame.pos = prePos
+                    if len(rotFrames) == 1 and rotFrames[0].value == NoeQuat():
+                        keyFrame.rot = preRot
+                    elif a == rotFrames[rotIdx].time:
+                        rot = rotFrames[rotIdx].value
+                        rot[0] *= -1
+                        rot[1] *= -1
+                        rot[3] *= -1
+                        keyFrame.rot = rot
+                        preRot = rot
+                        if rotIdx + 1 != len(rotFrames):
+                            rotIdx += 1
+                    else:
+                        keyFrame.rot = preRot
+                    rawFrames[name].append(keyFrame)
+        baseFov = int(rawFrames[fovName][0].pos[0])
+        basePos = rawFrames[camName][i].pos
+        for i in range(self.frameCount):
+            keyFrame = KeyFrame('cam', i)
+            fov = rawFrames[fovName][i].pos[0]
+            pos = rawFrames[camName][i].pos
+            keyFrame.pos = pos
+            if intName != "None":
+                intPos = rawFrames[intName][i].pos
+                direction = intPos - pos
+                xz_dist = math.sqrt(direction[0]**2 + direction[2]**2)
+                hor_rot = math.atan2(direction[1], xz_dist)
+                ver_rot = -math.atan2(direction[0], direction[2])
+                newRot = NoeAngles((hor_rot, ver_rot, 0.0)).toDegrees()
+                newRot[1] = 180.0 - newRot[1]
+                if isMmdCam:
+                    roll = rawFrames[camName][i].rot.toMatAngles()
+                    newRot[2] = roll[1]
+                    keyFrame.rot = newRot.toRadians()
+                else:
+                    newRot = newRot.toMat43_XYZ().toQuat()
+                    newRot[0] *= -1
+                    newRot[1] *= -1
+                    newRot[3] *= -1
+                    keyFrame.rot = newRot * rawFrames[camName][i].rot
+            else:
+                if isMmdCam:
+                    newRot = rawFrames[camName][i].rot.toMatAngles().toRadians()
+                    keyFrame.rot = NoeAngles((newRot[0] * -1, newRot[2], newRot[1]))
+                else:
+                    keyFrame.rot = rawFrames[camName][i].rot
+            if isMmdCam:
+                if int(fov) != baseFov and (basePos[0] - pos[0] > fovThreshold or basePos[0] - pos[0] < -fovThreshold) or \
+                (basePos[1] - pos[1] > fovThreshold or basePos[1] - pos[1] < -fovThreshold) or \
+                (basePos[2] - pos[2] > fovThreshold or basePos[2] - pos[2] < -fovThreshold):
+                    baseFov = int(fov)
+                basePos = pos
+                keyFrame.fov = baseFov
+                if fov.is_integer():
+                    keyFrame.distance = 0.0
+                else:
+                    decFov = fov - baseFov
+                    keyFrame.distance = (pos[2] * (1.0/baseFov)) * decFov
+            else:
+                keyFrame.fov = fov
+            keyFrames.append(keyFrame)
+        if isMmdCam:
+            tmp = []
+            for i in range(self.frameCount):
+                if i != 0 and i != self.frameCount - 1:
+                    if abs(keyFrames[i].pos[0] - keyFrames[i-1].pos[0]) < cleanupThreshold and abs(keyFrames[i].pos[0] - keyFrames[i+1].pos[0]) < cleanupThreshold and \
+                    abs(keyFrames[i].pos[1] - keyFrames[i-1].pos[1]) < cleanupThreshold and abs(keyFrames[i].pos[1] - keyFrames[i+1].pos[1]) < cleanupThreshold and \
+                    abs(keyFrames[i].pos[2] - keyFrames[i-1].pos[2]) < cleanupThreshold and abs(keyFrames[i].pos[2] - keyFrames[i+1].pos[2]) < cleanupThreshold and \
+                    abs(keyFrames[i].rot[0] - keyFrames[i-1].rot[0]) < cleanupThreshold and abs(keyFrames[i].rot[0] - keyFrames[i+1].rot[0]) < cleanupThreshold and \
+                    abs(keyFrames[i].rot[1] - keyFrames[i-1].rot[1]) < cleanupThreshold and abs(keyFrames[i].rot[1] - keyFrames[i+1].rot[1]) < cleanupThreshold and \
+                    abs(keyFrames[i].rot[2] - keyFrames[i-1].rot[2]) < cleanupThreshold and abs(keyFrames[i].rot[2] - keyFrames[i+1].rot[2]) < cleanupThreshold and \
+                    abs(keyFrames[i].distance - keyFrames[i-1].distance) < cleanupThreshold and abs(keyFrames[i].distance - keyFrames[i+1].distance) < cleanupThreshold and \
+                    abs(keyFrames[i].fov - keyFrames[i-1].fov) < cleanupThreshold and abs(keyFrames[i].fov - keyFrames[i+1].fov) < cleanupThreshold:
+                        continue
+                tmp.append(keyFrames[i])
+            keyFrames = tmp
+            f.write(struct.pack('I', len(keyFrames)))
+            for keyFrame in keyFrames:
+                f.write(struct.pack('I', keyFrame.frame))
+                f.write(struct.pack('f', keyFrame.distance * -1 * self.pmxScale))
+                f.write(struct.pack('f', keyFrame.pos[0] * self.pmxScale))
+                f.write(struct.pack('f', keyFrame.pos[1] * self.pmxScale))
+                f.write(struct.pack('f', keyFrame.pos[2] * -1 * self.pmxScale))
+                f.write(keyFrame.rot.toBytes())
+                f.write(bytearray.fromhex('14 6B 14 6B 14 6B 14 6B 14 6B 14 6B 14 6B 14 6B 14 6B 14 6B 14 6B 14 6B'))
+                f.write(struct.pack('I', keyFrame.fov))
+                f.write(struct.pack('B', 0x00))
+        else:
+            f.write(struct.pack('I', len(keyFrames) * 2))
+            for keyFrame in keyFrames:
+                f.write(camName.encode('shift_jis')[:14].ljust(15, b'\0'))
+                f.write(struct.pack('I', keyFrame.frame))
+                f.write(struct.pack('f', keyFrame.pos[0] * self.pmxScale))
+                f.write(struct.pack('f', keyFrame.pos[1] * self.pmxScale))
+                f.write(struct.pack('f', keyFrame.pos[2] * -1 * self.pmxScale))
+                f.write(keyFrame.rot.toBytes())
+                f.write(bytearray.fromhex('14 14 00 00 14 14 14 14 6B 6B 6B 6B 6B 6B 6B 6B 14 14 14 14 14 14 14 6B 6B 6B 6B 6B 6B 6B 6B 00 14 14 14 14 14 14 6B 6B 6B 6B 6B 6B 6B 6B 00 00 14 14 14 14 14 6B 6B 6B 6B 6B 6B 6B 6B 00 00 00'))
+                f.write(fovName.encode('shift_jis')[:14].ljust(15, b'\0'))
+                f.write(struct.pack('I', keyFrame.frame))
+                f.write(struct.pack('f', keyFrame.fov))
+                f.write(struct.pack('f', 0.0))
+                f.write(struct.pack('f', 0.0))
+                f.write(NoeQuat().toBytes())
+                f.write(bytearray.fromhex('14 14 00 00 14 14 14 14 6B 6B 6B 6B 6B 6B 6B 6B 14 14 14 14 14 14 14 6B 6B 6B 6B 6B 6B 6B 6B 00 14 14 14 14 14 14 6B 6B 6B 6B 6B 6B 6B 6B 00 00 14 14 14 14 14 6B 6B 6B 6B 6B 6B 6B 6B 00 00 00'))
 
     def readDict(self, dictName):
         d = {}
@@ -151,3 +303,5 @@ class KeyFrame:
         self.frame = frame
         self.pos = None
         self.rot = None
+        self.fov = None
+        self.distance = None
