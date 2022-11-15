@@ -199,6 +199,8 @@ class Vmd:
                     rawFrames[name].append(keyFrame)
         baseFov = int(rawFrames[fovName][0].pos[0])
         basePos = rawFrames[camName][i].pos
+        if baseFov <= 0:
+            baseFov = 1
         for i in range(self.frameCount):
             keyFrame = KeyFrame('cam', i)
             fov = rawFrames[fovName][i].pos[0]
@@ -233,6 +235,8 @@ class Vmd:
                 (basePos[1] - pos[1] > fovThreshold or basePos[1] - pos[1] < -fovThreshold) or \
                 (basePos[2] - pos[2] > fovThreshold or basePos[2] - pos[2] < -fovThreshold):
                     baseFov = int(fov)
+                    if baseFov <= 0:
+                        baseFov = 1
                 basePos = pos
                 keyFrame.fov = baseFov
                 if fov.is_integer():
