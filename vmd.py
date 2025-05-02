@@ -93,6 +93,9 @@ class Vmd:
                             posY = (bm[3][1] * -1 * bms * wScl[1]) - (matrix[3][1] - pMatrix[3][1])
                             posZ = (bm[3][2] * -1 * bms * wScl[2]) - (matrix[3][2] - pMatrix[3][2])
                             pos = NoeVec3((posX, posY, posZ))
+                        else:
+                            matrix = anim.bones[kfBone.boneIndex]._matrix
+                            pos = NoeVec3((pos[0] - matrix[3][0], pos[1] - matrix[3][1], pos[2] - matrix[3][2]))
                         keyFrame.pos = pos
                         prePos = pos
                         if posIdx + 1 != len(posFrames):
